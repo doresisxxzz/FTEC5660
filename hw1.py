@@ -63,7 +63,60 @@ def build_chain() -> Any:
     ``deepseek-v4-flash-vision-exp``. The API key is loaded from .env.
     """
     ### YOUR CODE HERE
-    return None
+    from langchain_core.prompts import ChatPromptTemplate
+    from langchain_deepseek import ChatDeepSeek
+
+    model = ChatDeepSeek(
+        model="deepseek-v4-flash-vision-exp",
+        temperature=0,
+        timeout=60,
+        max_retries=1,
+    )
+
+    prompt = ChatPromptTemplate.from_messages(
+        [
+            (
+                "system",
+                "You accurately extract monetary fields from Hong Kong "
+                "supermarket receipts. Follow the requested output format "
+                "exactly and do not invent unreadable values.",
+            ),
+            (
+                "human",
+                [
+                    {
+                        "type": "text",
+                        "text": (
+                            "Read this single receipt and return JSON only with "
+                            "these fields: final_payment, subtotal, and discounts. "
+                            "final_payment is the amount actually paid after the "
+                            "ROUNDING line. subtotal is the receipt's SUBTOTAL. "
+                            "discounts must contain one entry for EVERY printed "
+                            "negative monetary line above SUBTOTAL. Scan those "
+                            "lines one by one and return each absolute amount as a "
+                            "positive number. This includes Save, OFF, coupon, "
+                            "member, app, promotion, packaging-damage or packaging-"
+                            "deformation lines, and unlabeled negative amounts "
+                            "directly below an item. Never include the ROUNDING "
+                            "line, which appears below SUBTOTAL. Do not combine, "
+                            "round, or omit small negative amounts. Use null for an "
+                            "unreadable required amount and [] when there are no "
+                            "discounts. Return monetary values as strings with two "
+                            "decimal places. Example output: "
+                            '{{"final_payment":"102.30",'
+                            '"subtotal":"102.31","discounts":["5.39"]}}'
+                        ),
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": "{image_url}"},
+                    },
+                ],
+            ),
+        ]
+    )
+
+    return prompt | model
 
 
 def answer_queries(chain: Any, images: list[Path]) -> dict[str, Any]:
@@ -79,8 +132,78 @@ def answer_queries(chain: Any, images: list[Path]) -> dict[str, Any]:
     to process independent receipt-extraction prompts in parallel.
     """
     ### YOUR CODE HERE
-    _ = (chain, images)
-    return {QUERY_1: DUMMY_RESPONSE, QUERY_2: DUMMY_RESPONSE}
+    def parse_receipt_response(value: Any, image: Path) -> dict[str, Any]:
+        """Parse one model response, including JSON wrapped in code fences."""
+        text = response_text(value)
+        match = re.search(r"\{.*\}", text, re.DOTALL)
+        if match is None:
+            raise ValueError(f"No JSON object returned for {image.name}: {text!r}")
+
+        try:
+            data = json.loads(match.group(0))
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                f"Invalid JSON returned for {image.name}: {text!r}"
+            ) from exc
+
+        if not isinstance(data, dict):
+            raise ValueError(f"Expected a JSON object for {image.name}")
+        return data
+
+    def money(value: Any, field: str, image: Path) -> Decimal:
+        """Convert one extracted monetary value to a non-negative Decimal."""
+        if value is None or isinstance(value, bool):
+            raise ValueError(f"Missing {field} for {image.name}")
+
+        cleaned = re.sub(r"[^0-9.\-]", "", str(value))
+        try:
+            amount = Decimal(cleaned).quantize(Decimal("0.01"))
+        except (InvalidOperation, ValueError) as exc:
+            raise ValueError(
+                f"Invalid {field} value for {image.name}: {value!r}"
+            ) from exc
+        return abs(amount)
+
+    total_spent = Decimal("0.00")
+    total_without_discount = Decimal("0.00")
+
+    for image in images:
+        last_error: Exception | None = None
+        for _attempt in range(2):
+            try:
+                response = chain.invoke({"image_url": image_data_url(image)})
+                receipt = parse_receipt_response(response, image)
+
+                final_payment = money(
+                    receipt.get("final_payment"), "final_payment", image
+                )
+                subtotal = money(receipt.get("subtotal"), "subtotal", image)
+
+                discounts = receipt.get("discounts", [])
+                if discounts is None:
+                    discounts = []
+                if not isinstance(discounts, list):
+                    raise ValueError(f"discounts must be a list for {image.name}")
+
+                discount_total = sum(
+                    (money(value, "discount", image) for value in discounts),
+                    start=Decimal("0.00"),
+                )
+                break
+            except Exception as exc:
+                last_error = exc
+        else:
+            raise RuntimeError(
+                f"Could not extract a valid response for {image.name} after 2 attempts"
+            ) from last_error
+
+        total_spent += final_payment
+        total_without_discount += subtotal + discount_total
+
+    return {
+        QUERY_1: f"HK${total_spent:.2f}",
+        QUERY_2: f"HK${total_without_discount:.2f}",
+    }
 
 
 # Everything below is provided runner/scoring code. No edits are needed.

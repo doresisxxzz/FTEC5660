@@ -48,6 +48,20 @@ DeepSeek Flash model. JPEG, PNG, GIF, and WebP inputs are accepted by the
 homework runner.
 
 
-## Homework 1 solution: 
-> to students: please fill your solution description here.
+## Homework 1 solution
 
+```mermaid
+flowchart LR
+    A[Receipt image folder] --> B[Load every supported image]
+    B --> C[DeepSeek vision extraction]
+    C --> D{Valid JSON and monetary fields?}
+    D -- No --> E[Retry the receipt]
+    E --> C
+    D -- Yes --> F[Parse values with Decimal]
+    F --> G[Sum final payments]
+    F --> H[Sum subtotal plus discounts]
+    G --> I[Return one HKD amount for Query 1]
+    H --> J[Return one HKD amount for Query 2]
+```
+
+My LangChain pipeline uses `deepseek-v4-flash-vision-exp` to process each receipt image independently and extract three structured fields: the final payment after rounding, the subtotal before rounding, and every negative discount line above the subtotal. The prompt explicitly includes promotions, coupons, member and app discounts, percentage discounts, packaging-damage or deformation adjustments, and unlabeled negative item adjustments, while excluding the rounding line. The program validates the returned JSON and monetary fields, retries a receipt when extraction fails, and converts all amounts to Python `Decimal` values so that aggregation is accurate to the cent. It then sums the final payments for the first query and sums each subtotal plus its discounts for the second query, returning exactly one formatted HKD amount for each required question.
